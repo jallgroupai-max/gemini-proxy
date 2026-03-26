@@ -22,6 +22,10 @@ const DEFAULT_BASE_URL = DOMAIN === 'localhost'
 const WS_URL = process.env.WS_URL || '';
 const WS_REQUEST_TIMEOUT_MS = Number(process.env.WS_REQUEST_TIMEOUT_MS || 300000);
 const SW_VERSION = Date.now().toString();
+const FORCED_WS_TUNNEL_RULES = [
+  { origin: 'https://accounts.google.com', pathPrefix: '/RotateCookiesPage' },
+  { origin: 'https://signaler-pa.clients6.google.com', pathPrefix: '/punctual/multi-watch/channel' }
+];
 
 function isLocalHostName(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.localhost');
@@ -73,6 +77,19 @@ function encodeBase64Url(value) {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/g, '');
+}
+
+function shouldForceWsTunnelUrl(rawUrl, baseUrl = DEFAULT_BASE_URL) {
+  if (!rawUrl) return false;
+  try {
+    const resolved = new URL(rawUrl, baseUrl);
+    return FORCED_WS_TUNNEL_RULES.some((rule) => (
+      resolved.origin === rule.origin &&
+      resolved.pathname.startsWith(rule.pathPrefix)
+    ));
+  } catch (e) {
+    return false;
+  }
 }
 
 function isGeneratedImageAssetUrl(rawUrl, baseUrl = DEFAULT_BASE_URL) {
@@ -254,6 +271,9 @@ function shouldUseDirectUrl(rawUrl, baseUrl = DEFAULT_BASE_URL) {
   if (!rawUrl) return false;
   try {
     const resolved = new URL(rawUrl, baseUrl);
+    if (shouldForceWsTunnelUrl(resolved.toString(), baseUrl)) {
+      return false;
+    }
     return (
       resolved.origin === 'https://www.gstatic.com' &&
       resolved.pathname.startsWith('/_/mss/boq-bard-web/_/js')
@@ -327,6 +347,9 @@ function toPublicProxyUrl(rawUrl, baseUrl) {
   try {
     const publicBase = new URL(baseUrl || DEFAULT_BASE_URL);
     const resolved = new URL(rawUrl, publicBase.toString());
+    if (shouldForceWsTunnelUrl(resolved.toString(), publicBase.toString())) {
+      return `${publicBase.origin}/__proxy/${encodeBase64Url(resolved.toString())}`;
+    }
     if (shouldUseDirectUrl(resolved.toString(), publicBase.toString())) {
       return resolved.toString();
     }
@@ -415,6 +438,7 @@ let workerRestartTimer = null;
 let serverListening = false;
 let workerHeadless = null;
 const logFile = path.join(__dirname, 'log.txt');
+const hideGoogleUiFile = path.join(__dirname, 'hide-google-ui.js');
 
 function logLine(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -485,6 +509,11 @@ app.get('/logger.js', (req, res) => {
   var upstreamOrigin = ${JSON.stringify(upstreamOrigin)};
   function shouldKeepDirectUrl(u) {
     try {
+      if (${JSON.stringify(FORCED_WS_TUNNEL_RULES)}.some(function(rule) {
+        return u.origin === rule.origin && u.pathname.indexOf(rule.pathPrefix) === 0;
+      })) {
+        return false;
+      }
       return (
         u.origin === 'https://www.gstatic.com' &&
         u.pathname.indexOf('/_/mss/boq-bard-web/_/js') === 0
@@ -632,6 +661,12 @@ app.get('/logger.js', (req, res) => {
 })();
   `.trim();
   res.end(js);
+});
+
+app.get('/hide-google-ui.js', (req, res) => {
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.sendFile(hideGoogleUiFile);
 });
 
 app.get('/sw.js', (req, res) => {
@@ -810,6 +845,11 @@ function shouldIgnoreUrl(urlStr) {
 function shouldUseDirectUrl(urlStr) {
   try {
     var parsed = new URL(urlStr);
+    if (${JSON.stringify(FORCED_WS_TUNNEL_RULES)}.some(function(rule) {
+      return parsed.origin === rule.origin && parsed.pathname.indexOf(rule.pathPrefix) === 0;
+    })) {
+      return false;
+    }
     return (
       parsed.origin === 'https://www.gstatic.com' &&
       parsed.pathname.indexOf('/_/mss/boq-bard-web/_/js') === 0
@@ -1462,6 +1502,7 @@ async function fetchWithSession(url, method, headers, bodyBase64, baseUrl, refer
     const { text: html } = await readTextResponse(response);
     const $ = cheerio.load(html);
     $('head').prepend(`<base href="${baseUrl}/" />`);
+    $('head').prepend(`<script src="/hide-google-ui.js"></script>`);
     $('meta[http-equiv="Content-Security-Policy"]').remove();
     if (baseUrl.startsWith('https://')) {
       $('head').prepend(`<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">`);
@@ -1475,6 +1516,11 @@ async function fetchWithSession(url, method, headers, bodyBase64, baseUrl, refer
         })();
         function shouldKeepDirectUrl(u) {
           try {
+            if (${JSON.stringify(FORCED_WS_TUNNEL_RULES)}.some(function(rule) {
+              return u.origin === rule.origin && u.pathname.indexOf(rule.pathPrefix) === 0;
+            })) {
+              return false;
+            }
             return (
               u.origin === 'https://www.gstatic.com' &&
               u.pathname.indexOf('/_/mss/boq-bard-web/_/js') === 0
@@ -1584,6 +1630,24 @@ async function fetchWithSession(url, method, headers, bodyBase64, baseUrl, refer
           }
         } catch (e) {}
         try {
+          var iframeDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+          if (iframeDesc && iframeDesc.set) {
+            Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+              get: iframeDesc.get,
+              set: function(v) { return iframeDesc.set.call(this, encodeUrl(rewriteUrl(v))); }
+            });
+          }
+        } catch (e) {}
+        try {
+          var formActionDesc = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action');
+          if (formActionDesc && formActionDesc.set) {
+            Object.defineProperty(HTMLFormElement.prototype, 'action', {
+              get: formActionDesc.get,
+              set: function(v) { return formActionDesc.set.call(this, encodeUrl(rewriteUrl(v))); }
+            });
+          }
+        } catch (e) {}
+        try {
           var _insertRule = CSSStyleSheet.prototype.insertRule;
           CSSStyleSheet.prototype.insertRule = function(rule, index) {
             return _insertRule.call(this, upgradeCssText(rule), index);
@@ -1666,6 +1730,37 @@ async function fetchWithSession(url, method, headers, bodyBase64, baseUrl, refer
             window.open = function(url) {
               try { if (typeof url === 'string') url = encodeUrl(rewriteUrl(url)); } catch (e) {}
               return _openWindow.apply(window, [url].concat([].slice.call(arguments, 1)));
+            };
+          }
+        } catch (e) {}
+        try {
+          if (window.Location && Location.prototype) {
+            var _locationAssign = Location.prototype.assign;
+            if (_locationAssign) {
+              Location.prototype.assign = function(url) {
+                try { url = encodeUrl(rewriteUrl(url)); } catch (e) {}
+                return _locationAssign.call(this, url);
+              };
+            }
+            var _locationReplace = Location.prototype.replace;
+            if (_locationReplace) {
+              Location.prototype.replace = function(url) {
+                try { url = encodeUrl(rewriteUrl(url)); } catch (e) {}
+                return _locationReplace.call(this, url);
+              };
+            }
+          }
+        } catch (e) {}
+        try {
+          var _submit = HTMLFormElement.prototype.submit;
+          if (_submit) {
+            HTMLFormElement.prototype.submit = function() {
+              try {
+                if (this.action) {
+                  this.action = encodeUrl(rewriteUrl(this.action));
+                }
+              } catch (e) {}
+              return _submit.apply(this, arguments);
             };
           }
         } catch (e) {}
@@ -1791,10 +1886,25 @@ async function fetchWithSession(url, method, headers, bodyBase64, baseUrl, refer
         }
       });
     };
+    const rewriteMetaRefresh = () => {
+      $('meta[http-equiv]').each((_, el) => {
+        const httpEquiv = String($(el).attr('http-equiv') || '').toLowerCase();
+        if (httpEquiv !== 'refresh') return;
+        const content = $(el).attr('content');
+        if (!content) return;
+        const rewritten = String(content).replace(/(url=)([^;]+)/i, (_, prefix, refreshUrl) => {
+          const trimmed = String(refreshUrl || '').trim().replace(/^['"]|['"]$/g, '');
+          if (!trimmed) return `${prefix}${refreshUrl}`;
+          return `${prefix}${toPublicProxyUrl(trimmed, baseUrl)}`;
+        });
+        $(el).attr('content', rewritten);
+      });
+    };
 
     rewriteAttr('href');
     rewriteAttr('src');
     rewriteAttr('action');
+    rewriteMetaRefresh();
 
     let outHtml = $.html();
     outHtml = outHtml.replace(new RegExp(escapeRegExp(UPSTREAM_ORIGIN), 'g'), baseUrl);
@@ -1980,17 +2090,36 @@ const isAdminMode = process.argv.includes('-admin');
 const headlessDefault = !isAdminMode;
 const isHeadless = parseBooleanEnv(process.env.HEADLESS, headlessDefault);
 const sessionPath = path.join(__dirname, 'google-session');
+const linuxChromeCandidates = [
+  process.env.CHROME_PATH,
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/snap/bin/chromium'
+].filter(Boolean);
+const systemChromePath = process.platform === 'linux'
+  ? linuxChromeCandidates.find((candidate) => {
+      try {
+        return fs.existsSync(candidate);
+      } catch (e) {
+        return false;
+      }
+    })
+  : null;
 const launchArgs = process.platform === 'linux'
   ? ['--no-sandbox', '--disable-setuid-sandbox']
   : [];
 workerHeadless = isHeadless;
 
 async function launchWorkerContext(headlessMode) {
-  return chromium.launchPersistentContext(sessionPath, {
+  const launchOptions = {
     headless: headlessMode,
     args: launchArgs,
     viewport: { width: 1280, height: 720 }
-  });
+  };
+  if (systemChromePath) {
+    launchOptions.executablePath = systemChromePath;
+  }
+  return chromium.launchPersistentContext(sessionPath, launchOptions);
 }
 
 async function startWorker() {
