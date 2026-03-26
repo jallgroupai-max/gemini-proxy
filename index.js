@@ -22,6 +22,7 @@ const DEFAULT_BASE_URL = DOMAIN === 'localhost'
 const WS_URL = process.env.WS_URL || '';
 const WS_REQUEST_TIMEOUT_MS = Number(process.env.WS_REQUEST_TIMEOUT_MS || 300000);
 const SW_VERSION = Date.now().toString();
+const JALL_API_URL = process.env.JALL_API_URL || 'http://localhost:3002/api';
 const FORCED_WS_TUNNEL_RULES = [
   { origin: 'https://accounts.google.com', pathPrefix: '/RotateCookiesPage' },
   { origin: 'https://signaler-pa.clients6.google.com', pathPrefix: '/punctual/multi-watch/channel' }
@@ -267,6 +268,212 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+async function validateToken(token) {
+  try {
+    const url = `${JALL_API_URL}/user-accounts/validate-token?token=${token}`;
+    const response = await fetch(url);
+    if (!response.ok) return { valid: false };
+    return await response.json();
+  } catch (e) {
+    logLine(`[AUTH] token validation failed: ${e && e.message ? e.message : String(e)}`);
+    return { valid: false };
+  }
+}
+
+function getAuthTokenFromRequest(req) {
+  return req.query.token;
+}
+
+function isTokenEntryRoute(req) {
+  return req.path === '/' || req.path === '/app';
+}
+
+function isHtmlNavigationRequest(req) {
+  const accept = String(req.headers.accept || '').toLowerCase();
+  const secFetchDest = String(req.headers['sec-fetch-dest'] || '').toLowerCase();
+  const secFetchMode = String(req.headers['sec-fetch-mode'] || '').toLowerCase();
+
+  return (
+    req.path === '/' ||
+    req.path === '/app' ||
+    accept.includes('text/html') ||
+    secFetchDest === 'document' ||
+    secFetchDest === 'iframe' ||
+    secFetchMode === 'navigate'
+  );
+}
+
+function isPublicProxyRoute(req) {
+  if (req.method === 'OPTIONS') return true;
+
+  return [
+    '/health',
+    '/client-log',
+    '/log.txt',
+    '/logger.js',
+    '/sw.js',
+    '/sw-register.js',
+    '/favicon.ico'
+  ].includes(req.path);
+}
+
+function renderMissingTokenPage() {
+  return `
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Acceso Denegado</title>
+        <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+        <style>
+            body {
+                background-color: #121212;
+                color: #e0e0e0;
+                font-family: 'Roboto', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .card {
+                background-color: #1e1e1e;
+                border-radius: 12px;
+                padding: 40px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+                text-align: center;
+                max-width: 400px;
+                border: 1px solid #333;
+            }
+            h1 {
+                color: #ef5350;
+                font-size: 24px;
+                margin-bottom: 16px;
+            }
+            p {
+                color: #b0bec5;
+                font-size: 16px;
+                line-height: 1.5;
+                margin-bottom: 32px;
+            }
+            .btn {
+                background-color: #4caf50;
+                color: #000;
+                padding: 12px 24px;
+                border-radius: 24px;
+                text-decoration: none;
+                font-weight: bold;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                transition: background-color 0.3s;
+                display: inline-block;
+                box-shadow: 0 0 10px rgba(76, 175, 80, 0.3);
+            }
+            .btn:hover {
+                background-color: #66bb6a;
+                box-shadow: 0 0 15px rgba(102, 187, 106, 0.5);
+            }
+            .icon {
+                width: 64px;
+                height: 64px;
+                color: #ef5350;
+                margin-bottom: 16px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <svg class="icon" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M12 2C17.5 2 22 6.5 22 12S17.5 22 12 22 2 17.5 2 12 6.5 2 12 2M12 4C7.59 4 4 7.59 4 12S7.59 20 12 20 20 16.41 20 12 16.41 4 12 4M12 16C12.55 16 13 16.45 13 17S12.55 18 12 18 11 17.55 11 17 11.45 16 12 16M11 7H13V14H11V7Z" />
+            </svg>
+            <h1>Acceso Denegado</h1>
+            <p>No se proporcion&oacute; un token de acceso v&aacute;lido. Por favor adquiera una membres&iacute;a para continuar.</p>
+            <a href="https://jall.lat" class="btn">Adquirir Membres&iacute;a</a>
+        </div>
+    </body>
+    </html>
+  `;
+}
+
+function renderInvalidTokenPage() {
+  return `
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <title>Token Inv&aacute;lido o Expirado</title>
+        <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+        <style>
+            body {
+                background-color: #121212;
+                color: #e0e0e0;
+                font-family: 'Roboto', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .card {
+                background-color: #1e1e1e;
+                border-radius: 12px;
+                padding: 40px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+                text-align: center;
+                max-width: 400px;
+                border: 1px solid #333;
+            }
+            h1 {
+                color: #66bb6a;
+                font-size: 24px;
+                margin-bottom: 16px;
+            }
+            p {
+                color: #b0bec5;
+                font-size: 16px;
+                line-height: 1.5;
+                margin-bottom: 32px;
+            }
+            .btn {
+                background-color: #4caf50;
+                color: #000;
+                padding: 12px 24px;
+                border-radius: 24px;
+                text-decoration: none;
+                font-weight: bold;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                transition: background-color 0.3s;
+                display: inline-block;
+                box-shadow: 0 0 10px rgba(76, 175, 80, 0.3);
+            }
+            .btn:hover {
+                background-color: #66bb6a;
+                box-shadow: 0 0 15px rgba(102, 187, 106, 0.5);
+            }
+            .icon {
+                width: 64px;
+                height: 64px;
+                color: #ef5350;
+                margin-bottom: 16px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <svg class="icon" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2C6.47,2 2,6.47 2,12C2,17.53 6.47,22 12,22C17.53,22 22,17.53 22,12C22,6.47 17.53,2 12,2M11,7H13V15H11V7M11,17H13V19H11V17Z" />
+            </svg>
+            <h1>Token Inv&aacute;lido o Expirado</h1>
+            <p>Su token de sesion ha expirado o es invalido, por favor obtenga un nuevo token en jall.lat y adquiera el servicio de chatgpt por solo 0.3 el dia</p>
+            <a href="https://gpt.jall.lat" class="btn">Renovar Gemini</a>
+        </div>
+    </body>
+    </html>
+  `;
+}
+
 function shouldUseDirectUrl(rawUrl, baseUrl = DEFAULT_BASE_URL) {
   if (!rawUrl) return false;
   try {
@@ -438,7 +645,6 @@ let workerRestartTimer = null;
 let serverListening = false;
 let workerHeadless = null;
 const logFile = path.join(__dirname, 'log.txt');
-const hideGoogleUiFile = path.join(__dirname, 'hide-google-ui.js');
 
 function logLine(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -482,7 +688,9 @@ app.get('/health', (req, res) => {
 
 app.get('/', (req, res, next) => {
   if (req.path === '/' || req.originalUrl === '/') {
-    return res.redirect('/app');
+    const queryIndex = req.originalUrl.indexOf('?');
+    const search = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : '';
+    return res.redirect(`/app${search}`);
   }
   return next();
 });
@@ -661,12 +869,6 @@ app.get('/logger.js', (req, res) => {
 })();
   `.trim();
   res.end(js);
-});
-
-app.get('/hide-google-ui.js', (req, res) => {
-  res.setHeader('content-type', 'application/javascript; charset=utf-8');
-  res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.sendFile(hideGoogleUiFile);
 });
 
 app.get('/sw.js', (req, res) => {
@@ -1076,6 +1278,34 @@ app.get('/sw-register.js', (req, res) => {
 })();
   `.trim();
   res.end(js);
+});
+
+app.use(async (req, res, next) => {
+  if (isPublicProxyRoute(req) || !isHtmlNavigationRequest(req)) {
+    return next();
+  }
+
+  const entryRequestRequiresQueryToken = isTokenEntryRoute(req);
+  if (entryRequestRequiresQueryToken && !req.query.token) {
+    logLine(`[AUTH] missing query token ${req.method} ${req.originalUrl}`);
+    return res.status(403).send(renderMissingTokenPage());
+  }
+
+  const authToken = getAuthTokenFromRequest(req);
+  if (!authToken) {
+    logLine(`[AUTH] missing token ${req.method} ${req.originalUrl}`);
+    return res.status(403).send(renderMissingTokenPage());
+  }
+
+  const authData = await validateToken(authToken);
+  if (!authData || !authData.valid) {
+    logLine(`[AUTH] invalid token ${req.method} ${req.originalUrl}`);
+    return res.status(403).send(renderInvalidTokenPage());
+  }
+
+  req.authToken = authToken;
+  req.authData = authData;
+  return next();
 });
 
 app.use(async (req, res, next) => {
