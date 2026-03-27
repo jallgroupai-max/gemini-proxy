@@ -270,7 +270,7 @@ function escapeHtml(value) {
 
 async function validateToken(token) {
   try {
-    const url = `${JALL_API_URL}/user-accounts/validate-token?token=${token}`;
+    const url = `${JALL_API_URL}/user-accounts/validate-token?token=${encodeURIComponent(token)}`;
     console.log(`[AUTH:DEBUG] validateToken -> URL: ${url}`);
     console.log(`[AUTH:DEBUG] token recibido: ${token ? token.substring(0, 30) + '...' : 'NULO/VACÍO'}`);
 
@@ -288,16 +288,35 @@ async function validateToken(token) {
       console.log(`[AUTH:DEBUG] no se pudo decodificar el JWT: ${decodeErr.message}`);
     }
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: {
+        accept: 'application/json'
+      }
+    });
     console.log(`[AUTH:DEBUG] respuesta de la API: status=${response.status} ok=${response.ok}`);
+    const responseText = await response.text();
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '(no body)');
+      const body = responseText || '(no body)';
       console.log(`[AUTH:DEBUG] API respondió NO-OK. Body: ${body}`);
       return { valid: false };
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = responseText ? JSON.parse(responseText) : null;
+    } catch (parseErr) {
+      const contentType = String(response.headers.get('content-type') || '');
+      console.log(`[AUTH:DEBUG] respuesta no JSON. content-type=${contentType} body=${responseText.slice(0, 300)}`);
+      logLine(`[AUTH] token validation non-json response: ${contentType || 'unknown content-type'}`);
+      return { valid: false };
+    }
+
+    if (!data || typeof data !== 'object') {
+      console.log(`[AUTH:DEBUG] respuesta vacia o invalida de la API: ${responseText.slice(0, 300)}`);
+      logLine('[AUTH] token validation empty response');
+      return { valid: false };
+    }
     console.log(`[AUTH:DEBUG] respuesta JSON de la API:`, JSON.stringify(data));
     return data;
   } catch (e) {
@@ -308,11 +327,25 @@ async function validateToken(token) {
 }
 
 function getAuthTokenFromRequest(req) {
-  return req.query.token;
-}
+  if (req.query.token) {
+    return req.query.token;
+  }
 
-function isTokenEntryRoute(req) {
-  return req.path === '/' || req.path === '/app';
+  const rawCookieHeader = String(req.headers.cookie || '');
+  if (!rawCookieHeader) {
+    return '';
+  }
+
+  const tokenCookie = rawCookieHeader
+    .split(';')
+    .map((cookiePart) => cookiePart.trim())
+    .find((cookiePart) => cookiePart.startsWith('jall_token='));
+
+  if (!tokenCookie) {
+    return '';
+  }
+
+  return tokenCookie.slice('jall_token='.length).trim();
 }
 
 function isHtmlNavigationRequest(req) {
@@ -1312,12 +1345,6 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const entryRequestRequiresQueryToken = isTokenEntryRoute(req);
-  if (entryRequestRequiresQueryToken && !req.query.token) {
-    logLine(`[AUTH] missing query token ${req.method} ${req.originalUrl}`);
-    return res.status(403).send(renderMissingTokenPage());
-  }
-
   const authToken = getAuthTokenFromRequest(req);
   if (!authToken) {
     logLine(`[AUTH] missing token ${req.method} ${req.originalUrl}`);
@@ -1328,6 +1355,10 @@ app.use(async (req, res, next) => {
   if (!authData || !authData.valid) {
     logLine(`[AUTH] invalid token ${req.method} ${req.originalUrl}`);
     return res.status(403).send(renderInvalidTokenPage());
+  }
+
+  if (req.query.token) {
+    res.cookie('jall_token', authToken, { httpOnly: true, maxAge: 24 * 60 * 60 * 1000 });
   }
 
   req.authToken = authToken;
