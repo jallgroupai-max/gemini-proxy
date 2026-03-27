@@ -271,10 +271,37 @@ function escapeHtml(value) {
 async function validateToken(token) {
   try {
     const url = `${JALL_API_URL}/user-accounts/validate-token?token=${token}`;
+    console.log(`[AUTH:DEBUG] validateToken -> URL: ${url}`);
+    console.log(`[AUTH:DEBUG] token recibido: ${token ? token.substring(0, 30) + '...' : 'NULO/VACÍO'}`);
+
+    // Decodifica el payload del JWT sin verificar firma (solo para diagnóstico)
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+        const expDate = new Date(payload.exp * 1000);
+        const nowDate = new Date();
+        console.log(`[AUTH:DEBUG] JWT payload: userId=${payload.userId}, email=${payload.email}`);
+        console.log(`[AUTH:DEBUG] JWT exp: ${expDate.toISOString()} | ahora: ${nowDate.toISOString()} | expirado: ${nowDate > expDate}`);
+      }
+    } catch (decodeErr) {
+      console.log(`[AUTH:DEBUG] no se pudo decodificar el JWT: ${decodeErr.message}`);
+    }
+
     const response = await fetch(url);
-    if (!response.ok) return { valid: false };
-    return await response.json();
+    console.log(`[AUTH:DEBUG] respuesta de la API: status=${response.status} ok=${response.ok}`);
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '(no body)');
+      console.log(`[AUTH:DEBUG] API respondió NO-OK. Body: ${body}`);
+      return { valid: false };
+    }
+
+    const data = await response.json();
+    console.log(`[AUTH:DEBUG] respuesta JSON de la API:`, JSON.stringify(data));
+    return data;
   } catch (e) {
+    console.log(`[AUTH:DEBUG] EXCEPCIÓN en validateToken: ${e && e.message ? e.message : String(e)}`);
     logLine(`[AUTH] token validation failed: ${e && e.message ? e.message : String(e)}`);
     return { valid: false };
   }
